@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 
-# Tenta usar plotly (preferível por ser interativo e evitar matplotlib)
+# Tenta usar Plotly (evita problema com matplotlib)
 try:
     import plotly.express as px
     PLOTLY_AVAILABLE = True
@@ -73,6 +73,29 @@ elif pagina == "Base de Dados":
     try:
         df = pd.read_csv("alunos_emocoes_100.csv")
 
+        st.subheader("Exemplo de Base de Dados")
+        st.dataframe(df, use_container_width=True)
+
+        st.markdown("---")
+        st.subheader("Estatísticas Descritivas da Base de Dados")
+        st.dataframe(df.describe(), use_container_width=True)
+
+    except FileNotFoundError:
+        st.error("Arquivo 'alunos_emocoes_100.csv' não encontrado. Coloque-o na raiz do projeto.")
+    except Exception as e:
+        st.error("Ocorreu um erro ao carregar/operar sobre o dataset.")
+        st.exception(e)
+
+# ---------------------------
+# Página: Visualizações
+# ---------------------------
+elif pagina == "Visualizações":
+    st.header("Visualizações de Emoções")
+
+    try:
+        df = pd.read_csv("alunos_emocoes_100.csv")
+
+        # Filtro por emoção
         st.subheader("Filtro por Emoção")
         emocoes_disponiveis = df["expressao"].unique().tolist()
         emocao_selecionada = st.selectbox("Selecione uma emoção:", ["Todas"] + emocoes_disponiveis)
@@ -84,31 +107,25 @@ elif pagina == "Base de Dados":
             df_filtrado = df[df["expressao"] == emocao_selecionada]
 
         st.markdown("---")
-        st.subheader("Exemplo de Base de Dados")
-        st.dataframe(df_filtrado, use_container_width=True)
-
-        st.markdown("---")
         st.subheader("Distribuição das Emoções")
 
         # Contagem das emoções
         contagem_emocoes = df_filtrado["expressao"].value_counts().reset_index()
         contagem_emocoes.columns = ["Emoção", "Frequência"]
 
-        # ----------------------------------------------------------
-        # NOVO: Escolha do tipo de gráfico (Barras / Pizza / Ambos)
-        # ----------------------------------------------------------
+        # Escolha do tipo de gráfico
         tipo_grafico = st.radio(
             "Escolha o tipo de gráfico:",
             ["📊 Gráfico de Barras", "🥧 Gráfico de Pizza", "🎨 Ambos"],
             horizontal=True
         )
 
-        # Exibe gráfico de barras
+        # Gráfico de barras
         if tipo_grafico in ["📊 Gráfico de Barras", "🎨 Ambos"]:
             st.markdown("### 📊 Gráfico de Barras das Emoções")
             st.bar_chart(contagem_emocoes.set_index("Emoção"))
 
-        # Exibe gráfico de pizza (preferencialmente com plotly)
+        # Gráfico de pizza
         if tipo_grafico in ["🥧 Gráfico de Pizza", "🎨 Ambos"]:
             st.markdown("### 🥧 Gráfico de Pizza das Emoções")
 
@@ -123,34 +140,14 @@ elif pagina == "Base de Dados":
                 fig.update_traces(textinfo="percent+label")
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                st.warning(
-                    "Plotly não encontrado no ambiente. "
-                    "Tente instalar plotly (`pip install plotly`) ou verifique o arquivo requirements.txt."
-                )
-                # Exibe uma alternativa simples com st.metric / table para pelo menos mostrar dados
+                st.warning("Plotly não está instalado. Execute `pip install plotly` para ver o gráfico interativo.")
                 st.table(contagem_emocoes)
 
-        # ----------------------------------------------------------
-
-        st.markdown("---")
-        st.subheader("Estatísticas Descritivas da Base de Dados")
-        st.dataframe(df_filtrado.describe(), use_container_width=True)
-
     except FileNotFoundError:
-        st.error("Arquivo 'alunos_emocoes_100.csv' não encontrado. Coloque-o na raiz do projeto.")
+        st.error("Arquivo 'alunos_emocoes_100.csv' não encontrado.")
     except Exception as e:
-        st.error("Ocorreu um erro ao carregar/operar sobre o dataset.")
+        st.error("Erro ao gerar as visualizações.")
         st.exception(e)
-
-# ---------------------------
-# Página: Visualizações
-# ---------------------------
-elif pagina == "Visualizações":
-    st.header("Visualizações")
-
-    with st.container():
-        st.write("Aqui serão apresentados gráficos interativos, por exemplo:")
-        st.bar_chart({"Feliz": 12, "Triste": 5, "Medo": 3, "Neutro": 20, "Nojo": 2, "Nervoso": 8})
 
 # ---------------------------
 # Página: Futuras Expansões
