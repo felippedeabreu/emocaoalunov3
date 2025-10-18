@@ -159,7 +159,7 @@ elif pagina == "Visualizações":
             color="dominante_emocao",
             hover_data=["id_aluno", "regiao", "frequencia", "desempenho"],
             zoom=7,
-            height=1100,  # ~dobro
+            height=900,  # ~dobro
             mapbox_style="carto-positron",
             title="Distribuição Geográfica das Emoções"
         )
