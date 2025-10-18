@@ -151,17 +151,25 @@ elif pagina == "Visualizações":
 
         # Mapa
         st.markdown("### 🗺️ Mapa das Emoções por Região (Espírito Santo)")
+
         fig_mapa = px.scatter_mapbox(
-            df_f,
+             df_f,
             lat="lat",
             lon="lon",
             color="dominante_emocao",
             hover_data=["id_aluno", "regiao", "frequencia", "desempenho"],
             zoom=7,
-            height=550,
+            height=1100,  # ~dobro
             mapbox_style="carto-positron",
             title="Distribuição Geográfica das Emoções"
         )
+
+
+
+
+
+
+
         st.plotly_chart(fig_mapa, use_container_width=True)
 
         st.markdown("---")
