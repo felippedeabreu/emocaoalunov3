@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
+import json
 
 # ---------------------------
 # Configuração da página (uma única vez)
@@ -25,6 +27,51 @@ def carregar_dados():
         except Exception:
             continue
     return None, None
+
+# ---------------------------
+# GeoJSON → DataFrame de rótulos (municípios)
+# ---------------------------
+@st.cache_data(show_spinner=False)
+def carregar_rotulos_municipios(geojson_path="geojs-32-mun.json"):
+    """Lê o GeoJSON e cria um DataFrame com (nome, lat, lon) de cada município.
+    Usa o anel exterior e a média simples para posicionar o rótulo (aproximação)."""
+    try:
+        with open(geojson_path, "r", encoding="utf-8") as f:
+            gj = json.load(f)
+    except Exception:
+        # Se não achar o arquivo, volta vazio e sem borda
+        return pd.DataFrame(columns=["nome", "lat", "lon"]), None
+
+    labels = []
+    for feat in gj.get("features", []):
+        props = feat.get("properties", {}) or {}
+        nome = (
+            props.get("name")
+            or props.get("NM_MUN")
+            or props.get("NM_MUNICIP")
+            or props.get("municipio")
+            or "Município"
+        )
+        geom = feat.get("geometry", {}) or {}
+        gtype = geom.get("type")
+        coords = geom.get("coordinates", [])
+
+        def centroide_do_anel(anel):
+            xs = [p[0] for p in anel]
+            ys = [p[1] for p in anel]
+            return (sum(xs) / len(xs), sum(ys) / len(ys))
+
+        lat = lon = None
+        if gtype == "Polygon" and coords:
+            lon, lat = centroide_do_anel(coords[0])
+        elif gtype == "MultiPolygon" and coords:
+            lon, lat = centroide_do_anel(coords[0][0])
+
+        if lat is not None and lon is not None:
+            labels.append({"nome": nome, "lat": float(lat), "lon": float(lon)})
+
+    df_labels = pd.DataFrame(labels)
+    return df_labels, gj
 
 # ---------------------------
 # Menu lateral (com key)
@@ -180,10 +227,16 @@ elif pagina == "Visualizações":
                 key="regiao_vis"
             )
 
-        # Slider de altura do mapa na sidebar
-        map_height = st.sidebar.slider(
-            "Altura do mapa (px)", 600, 1600, 600, step=50, key="map_h"
+        # Controles do mapa
+        map_height = st.sidebar.slider("Altura do mapa (px)", 600, 1600, 1100, step=50, key="map_h")
+        map_style = st.sidebar.selectbox(
+            "Estilo do mapa",
+            ["open-street-map", "carto-positron", "carto-darkmatter"],
+            index=0, key="map_style"
         )
+        mostrar_rotulos = st.sidebar.checkbox("Mostrar nomes das cidades", True, key="show_labels")
+        tamanho_rotulo = st.sidebar.slider("Tamanho do rótulo (px)", 9, 20, 12, key="label_size")
+        mostrar_bordas = st.sidebar.checkbox("Desenhar limites municipais", True, key="show_borders")
 
         # Aplica filtros
         df_f = df.copy()
@@ -196,11 +249,19 @@ elif pagina == "Visualizações":
             st.info("Nenhum dado após os filtros selecionados.")
             st.stop()
 
+        # Detecta escala do desempenho para títulos/eixos
+        if "desempenho" in df_f.columns and not df_f["desempenho"].empty:
+            max_des = float(df_f["desempenho"].max())
+            escala = "0–10" if max_des <= 10 else "0–100"
+        else:
+            escala = "0–100"
+
         # ---------------------------
-        # Mapa
+        # Mapa (com rótulos e bordas)
         # ---------------------------
         st.markdown("### 🗺️ Mapa das Emoções por Região (Espírito Santo)")
         hover_cols = [c for c in ["id_aluno", "regiao", "frequencia", "desempenho"] if c in df_f.columns]
+
         fig_mapa = px.scatter_mapbox(
             df_f,
             lat="lat",
@@ -209,16 +270,16 @@ elif pagina == "Visualizações":
             hover_data=hover_cols,
             zoom=7,
             height=map_height,
-            mapbox_style="carto-positron",
+            mapbox_style=map_style,
             title="Distribuição Geográfica das Emoções",
             labels={"dominante_emocao": "Emoção dominante"}
         )
-        # Legenda e margens
+
         fig_mapa.update_layout(
             legend_title_text="Emoção dominante",
             margin=dict(l=0, r=0, t=40, b=0)
         )
-        # Centraliza conforme o filtro
+
         if {"lat", "lon"}.issubset(df_f.columns):
             fig_mapa.update_layout(
                 mapbox=dict(center=dict(
@@ -226,6 +287,38 @@ elif pagina == "Visualizações":
                     lon=float(df_f["lon"].mean())
                 ), zoom=7)
             )
+
+        # Carrega labels e geojson
+        labels_df, gj = carregar_rotulos_municipios("geojs-32-mun.json")
+
+        # BORDAS (camada geojson)
+        if mostrar_bordas and gj is not None:
+            fig_mapa.update_layout(
+                mapbox_layers=[{
+                    "sourcetype": "geojson",
+                    "source": gj,
+                    "type": "line",
+                    "line": {"width": 1.1, "color": "#444"}
+                }]
+            )
+
+        # RÓTULOS (texto por município)
+        if mostrar_rotulos and not labels_df.empty:
+            text_color = "white" if map_style == "carto-darkmatter" else "black"
+            fig_mapa.add_trace(
+                go.Scattermapbox(
+                    lat=labels_df["lat"],
+                    lon=labels_df["lon"],
+                    mode="text",
+                    text=labels_df["nome"],
+                    textfont=dict(size=int(tamanho_rotulo), color=text_color),
+                    textposition="top right",
+                    hoverinfo="skip",
+                    name="Municípios",
+                    showlegend=False
+                )
+            )
+
         st.plotly_chart(fig_mapa, use_container_width=True)
 
         st.markdown("---")
@@ -269,7 +362,7 @@ elif pagina == "Visualizações":
                 color='dominante_emocao' if 'dominante_emocao' in df_f.columns else None,
                 hover_data=[c for c in ['id_aluno', 'regiao'] if c in df_f.columns],
                 color_discrete_sequence=px.colors.qualitative.Set2,
-                labels={"frequencia": "Frequência (%)", "desempenho": "Desempenho"}
+                labels={"frequencia": "Frequência (%)", "desempenho": f"Desempenho ({escala})"}
             )
             fig_s.update_layout(legend_title_text="Emoção dominante")
             st.plotly_chart(fig_s, use_container_width=True)
@@ -352,19 +445,11 @@ elif pagina == "Visualizações":
             st.markdown("### Distribuição do Desempenho por Emoção")
             fig_box = px.box(
                 df_f, x="dominante_emocao", y="desempenho", points="all",
-                labels={"dominante_emocao": "Emoção", "desempenho": "Desempenho"},
+                labels={"dominante_emocao": "Emoção", "desempenho": f"Desempenho ({escala})"},
                 title="Boxplot de Desempenho por Emoção",
                 color="dominante_emocao", color_discrete_sequence=px.colors.qualitative.Set1
             )
             fig_box.update_layout(showlegend=False)
-
-            # Detecta escala automaticamente
-            if "desempenho" in df_f.columns and not df_f["desempenho"].empty:
-                max_des = float(df_f["desempenho"].max())
-                escala = "0–10" if max_des <= 10 else "0–100"
-            else:
-                escala = "0–100"
-            fig_box.update_layout(yaxis_title=f"Desempenho ({escala})")
 
             # Ordena emoções pela mediana (decrescente)
             order = (
