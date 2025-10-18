@@ -181,7 +181,7 @@ elif pagina == "Visualizações":
             )
 
         # Slider de altura do mapa na sidebar
-        map_height = st.sidebar.slider(a
+        map_height = st.sidebar.slider(
             "Altura do mapa (px)", 600, 1600, 600, step=50, key="map_h"
         )
 
