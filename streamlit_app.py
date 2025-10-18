@@ -1,11 +1,10 @@
 # app.py
 # -----------------------------------------------------------
 # Painel: Análise de Emoções em Alunos (Espírito Santo)
-# - Correções automáticas de lat/lon (sinal e colunas invertidas)
-# - Filtro geográfico do ES (bounding box) e opcional por GeoJSON
-# - Mapa com modo "Clusters" ou "Pontos por emoção"
-# - Desenho do contorno do ES (se houver es_limites.geojson)
-# - Demais gráficos (barras, pizza, scatter, paralelas)
+# - Usa geojs-32-mun.json (municípios do ES) para filtrar pontos
+# - Contorno/preenchimento do ES no mapa (Mapbox layer)
+# - Cluster ON/OFF e pontos coloridos por emoção
+# - Correções automáticas de lat/lon (sinal e inversão de colunas)
 # -----------------------------------------------------------
 
 import streamlit as st
@@ -14,33 +13,24 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
+import json
+
+st.set_page_config(page_title="Análise de Emoções em Alunos", page_icon="📊", layout="wide")
 
 # ---------------------------
-# Configuração da página
+# Arquivo GeoJSON e limites/centro do ES (fallback)
 # ---------------------------
-st.set_page_config(
-    page_title="Análise de Emoções em Alunos",
-    page_icon="📊",
-    layout="wide"
-)
-
-# ---------------------------
-# Constantes geográficas do ES
-# ---------------------------
+GEOJSON_ES = "geojs-32-mun.json"  # use o arquivo enviado
 ES_CENTER = {"lat": -19.5, "lon": -40.5}
-ES_BOUNDS = {
-    "lat_min": -21.4, "lat_max": -18.0,
-    "lon_min": -41.9, "lon_max": -39.0
-}
+ES_BOUNDS = {"lat_min": -21.4, "lat_max": -18.0, "lon_min": -41.9, "lon_max": -39.0}
 
 # ---------------------------
-# Funções utilitárias
+# Utilidades
 # ---------------------------
 @st.cache_data(show_spinner=False)
 def load_csv(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
-
-    # Normaliza lat/lon (ex.: "-19,45" -> -19.45)
+    # Normaliza vírgula decimal e strings estranhas
     for col in ["lat", "lon"]:
         if col in df.columns and df[col].dtype == "object":
             df[col] = (
@@ -51,29 +41,30 @@ def load_csv(path: str) -> pd.DataFrame:
             )
     return df
 
+@st.cache_data(show_spinner=False)
+def load_geojson(path: str):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
 def _guess_swap_and_sign(df: pd.DataFrame) -> (pd.DataFrame, dict):
     """
-    Corrige problemas comuns:
+    Corrige problemas comuns de geocodificação:
     - longitude positiva (torna negativa)
     - latitude positiva (torna negativa)
     - colunas lat/lon invertidas
-    Retorna df corrigido + contagem de correções.
     """
     fixes = {"lon_neg": 0, "lat_neg": 0, "swapped": False}
     d = df.copy()
 
-    # Se muitas lons > 0, inverte sinal
     if (d["lon"] > 0).mean() > 0.6:
         d["lon"] = -d["lon"]
         fixes["lon_neg"] = int((df["lon"] > 0).sum())
 
-    # Se muitas lats > 0, inverte sinal
     if (d["lat"] > 0).mean() > 0.6:
         d["lat"] = -d["lat"]
         fixes["lat_neg"] = int((df["lat"] > 0).sum())
 
-    # Heurística para colunas trocadas
-    # (lon típica ~ -40; lat típica ~ -19)
+    # ES: lon típica ~ -40; lat ~ -19  → se inverteram, detecta
     if d["lon"].abs().mean() < 30 and d["lat"].abs().mean() > 30:
         d[["lat", "lon"]] = d[["lon", "lat"]]
         fixes["swapped"] = True
@@ -81,44 +72,40 @@ def _guess_swap_and_sign(df: pd.DataFrame) -> (pd.DataFrame, dict):
     return d, fixes
 
 def filter_es_bounds(df: pd.DataFrame) -> (pd.DataFrame, int):
-    """Filtro por bounding box do ES."""
     mask = (
-        (df["lat"].between(ES_BOUNDS["lat_min"], ES_BOUNDS["lat_max"])) &
-        (df["lon"].between(ES_BOUNDS["lon_min"], ES_BOUNDS["lon_max"]))
+        df["lat"].between(ES_BOUNDS["lat_min"], ES_BOUNDS["lat_max"])
+        & df["lon"].between(ES_BOUNDS["lon_min"], ES_BOUNDS["lon_max"])
     )
-    removed = int((~mask).sum())
-    return df.loc[mask].copy(), removed
+    return df.loc[mask].copy(), int((~mask).sum())
 
-@st.cache_data(show_spinner=False)
-def load_geojson(path: str):
-    import json
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def filter_by_geojson(df: pd.DataFrame, geojson_path: str) -> (pd.DataFrame, int):
+def filter_by_geojson(df: pd.DataFrame, geojson_path: str) -> (pd.DataFrame, int, dict):
     """
-    Filtra pontos dentro do polígono via GeoJSON (shapely/geopandas).
-    Se houver erro/ausência das libs, cai no filtro por bounding box.
+    Filtra pontos dentro do polígono do ES utilizando Shapely (se disponível).
+    Retorna df_filtrado, removidos, e o objeto GeoJSON (para desenhar no mapa).
     """
+    gj = load_geojson(geojson_path)
     try:
-        import geopandas as gpd
-        from shapely.geometry import Point, shape
+        from shapely.geometry import shape, Point
         from shapely.ops import unary_union
+        from shapely.prepared import prep
 
-        gj = load_geojson(geojson_path)
         polys = [shape(feat["geometry"]) for feat in gj["features"]]
         es_poly = unary_union(polys)
+        es_prep = prep(es_poly)
 
-        gdf = gpd.GeoDataFrame(
-            df.copy(),
-            geometry=[Point(xy) for xy in zip(df["lon"], df["lat"])],
-            crs="EPSG:4326"
-        )
-        inside = gdf.geometry.within(es_poly)
-        removed = int((~inside).sum())
-        return gdf.loc[inside].drop(columns="geometry").copy(), removed
+        # inclui pontos "na borda" (touches) como válidos
+        mask = []
+        for x, y in zip(df["lon"].to_numpy(), df["lat"].to_numpy()):
+            p = Point(x, y)
+            mask.append(es_prep.contains(p) or es_poly.touches(p))
+        mask = np.array(mask, dtype=bool)
+
+        removed = int((~mask).sum())
+        return df.loc[mask].copy(), removed, gj
     except Exception:
-        return filter_es_bounds(df)
+        # Fallback para bounding box
+        dfb, removed = filter_es_bounds(df)
+        return dfb, removed, gj  # ainda retornamos o GeoJSON para desenhar contorno
 
 def center_from_df(df: pd.DataFrame) -> dict:
     if df.empty:
@@ -128,15 +115,9 @@ def center_from_df(df: pd.DataFrame) -> dict:
 def add_common_filters(df: pd.DataFrame):
     col1, col2 = st.columns(2)
     with col1:
-        emocao = st.selectbox(
-            "Filtrar por emoção:",
-            ["Todas"] + sorted(df["dominante_emocao"].dropna().unique().tolist())
-        )
+        emocao = st.selectbox("Filtrar por emoção:", ["Todas"] + sorted(df["dominante_emocao"].dropna().unique().tolist()))
     with col2:
-        regiao = st.selectbox(
-            "Filtrar por região:",
-            ["Todas"] + sorted(df["regiao"].dropna().unique().tolist())
-        )
+        regiao = st.selectbox("Filtrar por região:", ["Todas"] + sorted(df["regiao"].dropna().unique().tolist()))
     if emocao != "Todas":
         df = df[df["dominante_emocao"] == emocao]
     if regiao != "Todas":
@@ -144,97 +125,67 @@ def add_common_filters(df: pd.DataFrame):
     return df
 
 # ---------------------------
-# Menu lateral
+# Menu
 # ---------------------------
 st.sidebar.title("Navegação")
-pagina = st.sidebar.radio(
-    "Escolha uma seção:",
-    ["Introdução", "Base de Dados", "Visualizações", "Futuras Expansões"]
-)
+pagina = st.sidebar.radio("Escolha uma seção:", ["Introdução", "Base de Dados", "Visualizações", "Futuras Expansões"])
 
 # ---------------------------
-# Página: Introdução
+# Introdução
 # ---------------------------
 if pagina == "Introdução":
     st.header("Introdução")
-
-    with st.container():
-        st.title("Análise de Emoções em Alunos")
-
-        st.markdown("""
-        Esta aplicação apresenta um projeto desenvolvido como parte da avaliação da disciplina 
-        de **Ferramentas e Soluções em Nuvem** na Pós-graduação em **Mineração de Dados Educacionais** 
-        do **Instituto Federal do Espírito Santo - Campus Serra**.
-
-        **Professor:** Maxwell Monteiro  
-        **Aluno:** Felippe de Abreu  
-        """)
-
+    st.title("Análise de Emoções em Alunos")
+    st.markdown("""
+    Projeto da disciplina **Ferramentas e Soluções em Nuvem** (Pós **Mineração de Dados Educacionais** — IFES/Serra).  
+    **Professor:** Maxwell Monteiro — **Aluno:** Felippe de Abreu
+    """)
     st.markdown("---")
-
     with st.expander("🎯 Objetivo do Projeto"):
-        st.write("""
-        Criar um painel interativo para visualizar e analisar emoções de alunos, 
-        buscando padrões que possam se relacionar a desempenho e risco de evasão.
-        """)
-
-    with st.expander("📊 Fonte dos Dados"):
-        st.write("""
-        - Dataset simulado (feliz, medo, nervoso, neutro, nojo, triste) + frequência e desempenho;
-        - Bases públicas como **FER2013** e **Student Performance (UCI)** em versões futuras.
-        """)
+        st.write("Criar um painel interativo para visualizar e analisar emoções e possíveis relações com desempenho e evasão.")
+    with st.expander("📊 Fontes de Dados"):
+        st.write("- Dataset simulado (emoções, frequência, desempenho). Integrações futuras: **FER2013**, **UCI Student Performance**.")
 
 # ---------------------------
-# Página: Base de Dados
+# Base de Dados
 # ---------------------------
 elif pagina == "Base de Dados":
     st.header("Base de Dados")
-    st.write("""
-    Neste projeto, inicialmente são usadas:
-    - Um conjunto simulado de expressões faciais;
-    - Possível integração futura com **FER2013** e **Student Performance (UCI)**.
-    """)
-
     try:
         df = load_csv("alunos_emocoes_1000.csv")
         st.subheader("Filtros")
         df_filtrado = add_common_filters(df)
-
         st.markdown("---")
-        st.subheader("Visualização da Base de Dados")
+        st.subheader("Visualização")
         st.dataframe(df_filtrado, use_container_width=True)
-
         st.markdown("---")
         st.subheader("Estatísticas Descritivas")
         st.dataframe(df_filtrado.describe(include="all"), use_container_width=True)
-
     except Exception as e:
-        st.warning("⚠️ Não foi possível carregar o dataset. Verifique o arquivo 'alunos_emocoes_1000.csv'.")
+        st.warning("⚠️ Não foi possível carregar 'alunos_emocoes_1000.csv'.")
         st.exception(e)
 
 # ---------------------------
-# Página: Visualizações
+# Visualizações
 # ---------------------------
 elif pagina == "Visualizações":
     st.header("Visualizações Interativas")
-
     try:
         df_raw = load_csv("alunos_emocoes_1000.csv")
 
-        # ---- Correções automáticas (sinais/colunas) ----
+        # Correções de lat/lon
         df_corr, fixes = _guess_swap_and_sign(df_raw)
         msgs = []
         if fixes["lon_neg"] > 0: msgs.append(f"longitude positiva corrigida: {fixes['lon_neg']}")
         if fixes["lat_neg"] > 0: msgs.append(f"latitude positiva corrigida: {fixes['lat_neg']}")
         if fixes["swapped"]:     msgs.append("colunas lat/lon invertidas foram corrigidas")
         if msgs:
-            st.info("Correções aplicadas: " + " · ".join(msgs))
+            st.info("Correções: " + " · ".join(msgs))
 
-        # ---- Filtros de campo ----
         st.subheader("Filtros")
         df_f = add_common_filters(df_corr)
-
         st.markdown("---")
+
         # ---------------------------
         # Mapa
         # ---------------------------
@@ -242,22 +193,20 @@ elif pagina == "Visualizações":
 
         c1, c2, c3 = st.columns(3)
         with c1:
-            modo_mapa = st.radio("Modo de visualização:", ["Clusters", "Pontos por emoção"], horizontal=True)
+            modo_mapa = st.radio("Visualização:", ["Clusters", "Pontos por emoção"], horizontal=True)
         with c2:
             marker_size = st.slider("Tamanho do marcador", 5, 18, 9, 1)
         with c3:
-            mostrar_limite = st.checkbox("Mostrar contorno do ES (GeoJSON)", value=True)
+            preencher = st.checkbox("Preencher o polígono do ES", value=False, help="Desenha um fill suave do estado.")
 
-        # Filtragem geográfica
-        if mostrar_limite and Path("es_limites.geojson").exists():
-            df_geo, removed = filter_by_geojson(df_f, "es_limites.geojson")
-            es_geojson = load_geojson("es_limites.geojson")
+        if Path(GEOJSON_ES).exists():
+            df_geo, removidos, es_geojson = filter_by_geojson(df_f, GEOJSON_ES)
         else:
-            df_geo, removed = filter_es_bounds(df_f)
+            df_geo, removidos = filter_es_bounds(df_f)
             es_geojson = None
 
-        if removed > 0:
-            st.warning(f"{removed} ponto(s) fora do ES foram removidos.")
+        if removidos > 0:
+            st.warning(f"{removidos} ponto(s) fora do Espírito Santo foram removidos.")
 
         if df_geo.empty:
             st.error("Sem dados para plotar após os filtros.")
@@ -265,23 +214,19 @@ elif pagina == "Visualizações":
             center = center_from_df(df_geo)
 
             if modo_mapa == "Clusters":
-                # Clusters neutros (centroides podem cair em mar — é normal)
                 fig_mapa = go.Figure(go.Scattermapbox(
                     lat=df_geo["lat"], lon=df_geo["lon"],
                     mode="markers",
-                    marker=dict(size=marker_size, color="#4c5563"),  # cinza neutro
-                    text=(
-                        "Aluno: " + df_geo["id_aluno"].astype(str) +
-                        "<br>Região: " + df_geo["regiao"].astype(str) +
-                        "<br>Emoção: " + df_geo["dominante_emocao"].astype(str) +
-                        "<br>Freq: " + df_geo["frequencia"].astype(str) +
-                        "<br>Desemp.: " + df_geo["desempenho"].astype(str)
-                    ),
+                    marker=dict(size=marker_size, color="#4c5563"),
+                    text=("Aluno: " + df_geo["id_aluno"].astype(str)
+                          + "<br>Região: " + df_geo["regiao"].astype(str)
+                          + "<br>Emoção: " + df_geo["dominante_emocao"].astype(str)
+                          + "<br>Freq: " + df_geo["frequencia"].astype(str)
+                          + "<br>Desemp.: " + df_geo["desempenho"].astype(str)),
                     hoverinfo="text",
                     cluster=dict(enabled=True)
                 ))
             else:
-                # Pontos individuais coloridos por emoção (sem cluster)
                 fig_mapa = go.Figure()
                 for emocao, dfg in df_geo.groupby("dominante_emocao"):
                     fig_mapa.add_trace(go.Scattermapbox(
@@ -289,81 +234,68 @@ elif pagina == "Visualizações":
                         name=str(emocao),
                         mode="markers",
                         marker=dict(size=marker_size),
-                        text=(
-                            "Aluno: " + dfg["id_aluno"].astype(str) +
-                            "<br>Região: " + dfg["regiao"].astype(str) +
-                            "<br>Emoção: " + dfg["dominante_emocao"].astype(str) +
-                            "<br>Freq: " + dfg["frequencia"].astype(str) +
-                            "<br>Desemp.: " + dfg["desempenho"].astype(str)
-                        ),
+                        text=("Aluno: " + dfg["id_aluno"].astype(str)
+                              + "<br>Região: " + dfg["regiao"].astype(str)
+                              + "<br>Emoção: " + dfg["dominante_emocao"].astype(str)
+                              + "<br>Freq: " + dfg["frequencia"].astype(str)
+                              + "<br>Desemp.: " + dfg["desempenho"].astype(str)),
                         hoverinfo="text"
                     ))
 
+            # Base do mapa
             fig_mapa.update_layout(
-                mapbox=dict(
-                    style="open-street-map",  # não requer token
-                    center=center,
-                    zoom=7
-                ),
+                mapbox=dict(style="open-street-map", center=center, zoom=7),
                 margin=dict(l=0, r=0, t=40, b=0),
                 title="Distribuição Geográfica das Emoções (ES)"
             )
 
-            # Sobrepor contorno do ES (se geojson existir)
+            # Desenhar contorno (e, opcionalmente, preenchimento) do ES
+            layers = []
             if es_geojson:
-                fig_mapa.update_layout(mapbox_layers=[
-                    {
-                        "source": es_geojson,
-                        "type": "line",
-                        "color": "#6B5FB5",
-                        "line": {"width": 2},
-                    }
-                ])
+                if preencher:
+                    layers.append({
+                        "source": es_geojson, "type": "fill",
+                        "color": "#6B5FB5", "opacity": 0.05
+                    })
+                layers.append({
+                    "source": es_geojson, "type": "line",
+                    "color": "#6B5FB5", "line": {"width": 2}
+                })
+            if layers:
+                fig_mapa.update_layout(mapbox_layers=layers)
 
             st.plotly_chart(fig_mapa, use_container_width=True)
 
         st.markdown("---")
-        # ---------------------------
-        # Gráficos de distribuição
-        # ---------------------------
+        # Distribuição das emoções
         st.subheader("Distribuição das Emoções")
-        contagem_emocoes = df_f["dominante_emocao"].value_counts().reset_index()
-        contagem_emocoes.columns = ["Emoção", "Frequência"]
+        cont = df_f["dominante_emocao"].value_counts().reset_index()
+        cont.columns = ["Emoção", "Frequência"]
 
         col3, col4 = st.columns(2)
         with col3:
-            fig_bar = px.bar(
-                contagem_emocoes, x="Emoção", y="Frequência", color="Emoção",
-                text_auto=True, color_discrete_sequence=px.colors.qualitative.Set3,
-                title="Contagem por Emoção"
-            )
+            fig_bar = px.bar(cont, x="Emoção", y="Frequência", color="Emoção",
+                             text_auto=True, color_discrete_sequence=px.colors.qualitative.Set3,
+                             title="Contagem por Emoção")
             st.plotly_chart(fig_bar, use_container_width=True)
         with col4:
-            fig_pie = px.pie(
-                contagem_emocoes, names="Emoção", values="Frequência",
-                color_discrete_sequence=px.colors.qualitative.Set3, hole=0.3,
-                title="Proporção por Emoção"
-            )
+            fig_pie = px.pie(cont, names="Emoção", values="Frequência",
+                             color_discrete_sequence=px.colors.qualitative.Set3, hole=0.3,
+                             title="Proporção por Emoção")
             fig_pie.update_traces(textinfo="percent+label")
             st.plotly_chart(fig_pie, use_container_width=True)
 
         st.markdown("---")
-        # ---------------------------
-        # Scatter: Desempenho x Frequência
-        # ---------------------------
+        # Scatter desempenho x frequência
         st.subheader("Desempenho × Frequência (colorido por emoção)")
-        fig_s = px.scatter(
-            df_f, x="frequencia", y="desempenho",
-            color="dominante_emocao", hover_data=["id_aluno", "regiao"],
-            color_discrete_sequence=px.colors.qualitative.Set2
-        )
+        fig_s = px.scatter(df_f, x="frequencia", y="desempenho",
+                           color="dominante_emocao", hover_data=["id_aluno", "regiao"],
+                           color_discrete_sequence=px.colors.qualitative.Set2)
         fig_s.update_traces(marker=dict(size=9, line=dict(width=0)))
         st.plotly_chart(fig_s, use_container_width=True)
 
         st.markdown("---")
-        # ---------------------------
-        # Coordenadas Paralelas
-        # ---------------------------
+        # Coordenadas paralelas
         st.subheader("Relação entre Emoções, Frequência e Desempenho")
         dims = ['score_feliz', 'score_medo', 'score_nervoso', 'score_neutro',
                 'score_nojo', 'score_triste', 'frequencia', 'desempenho']
@@ -383,14 +315,13 @@ elif pagina == "Visualizações":
         st.exception(e)
 
 # ---------------------------
-# Página: Futuras Expansões
+# Futuras Expansões
 # ---------------------------
 elif pagina == "Futuras Expansões":
     st.header("Futuras Expansões")
-    with st.expander("🔮 Possibilidades Futuras"):
+    with st.expander("🔮 Possibilidades"):
         st.write("""
-        - Aplicação de modelos de Machine Learning para identificar emoções automaticamente;
-        - Correlação entre emoções, desempenho acadêmico e evasão escolar;
-        - Dashboard com filtros por turma, disciplina, período e intervenções;
-        - Coleta em tempo real com câmera/webcam integrada.
+        - Modelos de ML para identificar emoções automaticamente;
+        - Correlações entre emoções, desempenho e evasão;
+        - Filtros por turma/disciplina/período; coleta em tempo real via webcam.
         """)
