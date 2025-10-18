@@ -1,3 +1,13 @@
+# app.py
+# -----------------------------------------------------------
+# Painel: Análise de Emoções em Alunos (Espírito Santo)
+# - Correções automáticas de lat/lon (sinal e colunas invertidas)
+# - Filtro geográfico do ES (bounding box) e opcional por GeoJSON
+# - Mapa com modo "Clusters" ou "Pontos por emoção"
+# - Desenho do contorno do ES (se houver es_limites.geojson)
+# - Demais gráficos (barras, pizza, scatter, paralelas)
+# -----------------------------------------------------------
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -29,7 +39,8 @@ ES_BOUNDS = {
 @st.cache_data(show_spinner=False)
 def load_csv(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
-    # Normaliza lat/lon (se vierem como string com vírgula decimal)
+
+    # Normaliza lat/lon (ex.: "-19,45" -> -19.45)
     for col in ["lat", "lon"]:
         if col in df.columns and df[col].dtype == "object":
             df[col] = (
@@ -44,26 +55,25 @@ def _guess_swap_and_sign(df: pd.DataFrame) -> (pd.DataFrame, dict):
     """
     Corrige problemas comuns:
     - longitude positiva (torna negativa)
-    - latitudes positivas (torna negativas, já que ES está no hemisfério sul)
-    - colunas trocadas (lat/ lon invertidas)
-    Retorna df corrigido + contagem de correções para exibir ao usuário.
+    - latitude positiva (torna negativa)
+    - colunas lat/lon invertidas
+    Retorna df corrigido + contagem de correções.
     """
     fixes = {"lon_neg": 0, "lat_neg": 0, "swapped": False}
-
-    # Copiamos para não modificar original
     d = df.copy()
 
-    # Se muitos lons > 0, inverta o sinal
+    # Se muitas lons > 0, inverte sinal
     if (d["lon"] > 0).mean() > 0.6:
         d["lon"] = -d["lon"]
         fixes["lon_neg"] = int((df["lon"] > 0).sum())
 
-    # Se muitas lats > 0, inverta o sinal
+    # Se muitas lats > 0, inverte sinal
     if (d["lat"] > 0).mean() > 0.6:
         d["lat"] = -d["lat"]
         fixes["lat_neg"] = int((df["lat"] > 0).sum())
 
-    # Heurística: se a média de |lon| ~ 20 e de |lat| ~ 40, provavelmente estão invertidas
+    # Heurística para colunas trocadas
+    # (lon típica ~ -40; lat típica ~ -19)
     if d["lon"].abs().mean() < 30 and d["lat"].abs().mean() > 30:
         d[["lat", "lon"]] = d[["lon", "lat"]]
         fixes["swapped"] = True
@@ -87,19 +97,16 @@ def load_geojson(path: str):
 
 def filter_by_geojson(df: pd.DataFrame, geojson_path: str) -> (pd.DataFrame, int):
     """
-    Filtra pontos que estão dentro do polígono do ES usando shapely/geopandas.
-    Requer geopandas; se não tiver, cai no filtro por bounding box.
+    Filtra pontos dentro do polígono via GeoJSON (shapely/geopandas).
+    Se houver erro/ausência das libs, cai no filtro por bounding box.
     """
     try:
         import geopandas as gpd
         from shapely.geometry import Point, shape
+        from shapely.ops import unary_union
 
         gj = load_geojson(geojson_path)
-        # Une todos os polígonos do GeoJSON em um único shape
-        from shapely.ops import unary_union
-        polys = []
-        for feat in gj["features"]:
-            polys.append(shape(feat["geometry"]))
+        polys = [shape(feat["geometry"]) for feat in gj["features"]]
         es_poly = unary_union(polys)
 
         gdf = gpd.GeoDataFrame(
@@ -107,11 +114,10 @@ def filter_by_geojson(df: pd.DataFrame, geojson_path: str) -> (pd.DataFrame, int
             geometry=[Point(xy) for xy in zip(df["lon"], df["lat"])],
             crs="EPSG:4326"
         )
-        inside_mask = gdf.geometry.within(es_poly)
-        removed = int((~inside_mask).sum())
-        return gdf.loc[inside_mask].drop(columns="geometry").copy(), removed
+        inside = gdf.geometry.within(es_poly)
+        removed = int((~inside).sum())
+        return gdf.loc[inside].drop(columns="geometry").copy(), removed
     except Exception:
-        # Fallback para bounding box
         return filter_es_bounds(df)
 
 def center_from_df(df: pd.DataFrame) -> dict:
@@ -122,9 +128,15 @@ def center_from_df(df: pd.DataFrame) -> dict:
 def add_common_filters(df: pd.DataFrame):
     col1, col2 = st.columns(2)
     with col1:
-        emocao = st.selectbox("Filtrar por emoção:", ["Todas"] + sorted(df["dominante_emocao"].dropna().unique().tolist()))
+        emocao = st.selectbox(
+            "Filtrar por emoção:",
+            ["Todas"] + sorted(df["dominante_emocao"].dropna().unique().tolist())
+        )
     with col2:
-        regiao = st.selectbox("Filtrar por região:", ["Todas"] + sorted(df["regiao"].dropna().unique().tolist()))
+        regiao = st.selectbox(
+            "Filtrar por região:",
+            ["Todas"] + sorted(df["regiao"].dropna().unique().tolist())
+        )
     if emocao != "Todas":
         df = df[df["dominante_emocao"] == emocao]
     if regiao != "Todas":
@@ -162,14 +174,14 @@ if pagina == "Introdução":
 
     with st.expander("🎯 Objetivo do Projeto"):
         st.write("""
-        Criar um painel interativo para visualizar e analisar emoções de alunos, buscando padrões
-        que possam se relacionar a desempenho acadêmico e risco de evasão.
+        Criar um painel interativo para visualizar e analisar emoções de alunos, 
+        buscando padrões que possam se relacionar a desempenho e risco de evasão.
         """)
 
     with st.expander("📊 Fonte dos Dados"):
         st.write("""
-        - Dataset simulado com emoções (feliz, medo, nervoso, neutro, nojo, triste) + frequência e desempenho;  
-        - Bases públicas como **FER2013** e **Student Performance (UCI)** poderão ser integradas futuramente.
+        - Dataset simulado (feliz, medo, nervoso, neutro, nojo, triste) + frequência e desempenho;
+        - Bases públicas como **FER2013** e **Student Performance (UCI)** em versões futuras.
         """)
 
 # ---------------------------
@@ -179,7 +191,7 @@ elif pagina == "Base de Dados":
     st.header("Base de Dados")
     st.write("""
     Neste projeto, inicialmente são usadas:
-    - Um conjunto simulado de expressões faciais (feliz, medo, nervoso, neutro, nojo, triste);
+    - Um conjunto simulado de expressões faciais;
     - Possível integração futura com **FER2013** e **Student Performance (UCI)**.
     """)
 
@@ -223,49 +235,69 @@ elif pagina == "Visualizações":
         df_f = add_common_filters(df_corr)
 
         st.markdown("---")
-        # ---- Opções de mapa ----
+        # ---------------------------
+        # Mapa
+        # ---------------------------
         st.subheader("🗺️ Mapa das Emoções por Região (Espírito Santo)")
-        with st.expander("Opções do mapa", expanded=True):
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                usar_cluster = st.checkbox("Agrupar pontos (cluster)", value=True)
-            with c2:
-                usar_geojson = st.checkbox("Filtrar usando GeoJSON do ES (opcional)", value=False,
-                                           help="Coloque um arquivo 'es_limites.geojson' na pasta do app.")
-            with c3:
-                marker_size = st.slider("Tamanho do marcador", min_value=5, max_value=18, value=9, step=1)
 
-        # ---- Filtragem geográfica ----
-        if usar_geojson and Path("es_limites.geojson").exists():
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            modo_mapa = st.radio("Modo de visualização:", ["Clusters", "Pontos por emoção"], horizontal=True)
+        with c2:
+            marker_size = st.slider("Tamanho do marcador", 5, 18, 9, 1)
+        with c3:
+            mostrar_limite = st.checkbox("Mostrar contorno do ES (GeoJSON)", value=True)
+
+        # Filtragem geográfica
+        if mostrar_limite and Path("es_limites.geojson").exists():
             df_geo, removed = filter_by_geojson(df_f, "es_limites.geojson")
+            es_geojson = load_geojson("es_limites.geojson")
         else:
             df_geo, removed = filter_es_bounds(df_f)
+            es_geojson = None
 
         if removed > 0:
-            st.warning(f"{removed} ponto(s) estavam fora do Espírito Santo e foram removidos.")
+            st.warning(f"{removed} ponto(s) fora do ES foram removidos.")
 
-        # ---- Plot do mapa (com cluster) ----
         if df_geo.empty:
             st.error("Sem dados para plotar após os filtros.")
         else:
             center = center_from_df(df_geo)
 
-            # Usando go.Scattermapbox para habilitar cluster
-            fig_mapa = go.Figure(go.Scattermapbox(
-                lat=df_geo["lat"],
-                lon=df_geo["lon"],
-                mode="markers",
-                marker=dict(size=marker_size),
-                text=(
-                    "Aluno: " + df_geo["id_aluno"].astype(str) +
-                    "<br>Região: " + df_geo["regiao"].astype(str) +
-                    "<br>Emoção: " + df_geo["dominante_emocao"].astype(str) +
-                    "<br>Freq: " + df_geo["frequencia"].astype(str) +
-                    "<br>Desemp.: " + df_geo["desempenho"].astype(str)
-                ),
-                hoverinfo="text",
-                cluster=dict(enabled=usar_cluster)
-            ))
+            if modo_mapa == "Clusters":
+                # Clusters neutros (centroides podem cair em mar — é normal)
+                fig_mapa = go.Figure(go.Scattermapbox(
+                    lat=df_geo["lat"], lon=df_geo["lon"],
+                    mode="markers",
+                    marker=dict(size=marker_size, color="#4c5563"),  # cinza neutro
+                    text=(
+                        "Aluno: " + df_geo["id_aluno"].astype(str) +
+                        "<br>Região: " + df_geo["regiao"].astype(str) +
+                        "<br>Emoção: " + df_geo["dominante_emocao"].astype(str) +
+                        "<br>Freq: " + df_geo["frequencia"].astype(str) +
+                        "<br>Desemp.: " + df_geo["desempenho"].astype(str)
+                    ),
+                    hoverinfo="text",
+                    cluster=dict(enabled=True)
+                ))
+            else:
+                # Pontos individuais coloridos por emoção (sem cluster)
+                fig_mapa = go.Figure()
+                for emocao, dfg in df_geo.groupby("dominante_emocao"):
+                    fig_mapa.add_trace(go.Scattermapbox(
+                        lat=dfg["lat"], lon=dfg["lon"],
+                        name=str(emocao),
+                        mode="markers",
+                        marker=dict(size=marker_size),
+                        text=(
+                            "Aluno: " + dfg["id_aluno"].astype(str) +
+                            "<br>Região: " + dfg["regiao"].astype(str) +
+                            "<br>Emoção: " + dfg["dominante_emocao"].astype(str) +
+                            "<br>Freq: " + dfg["frequencia"].astype(str) +
+                            "<br>Desemp.: " + dfg["desempenho"].astype(str)
+                        ),
+                        hoverinfo="text"
+                    ))
 
             fig_mapa.update_layout(
                 mapbox=dict(
@@ -276,6 +308,17 @@ elif pagina == "Visualizações":
                 margin=dict(l=0, r=0, t=40, b=0),
                 title="Distribuição Geográfica das Emoções (ES)"
             )
+
+            # Sobrepor contorno do ES (se geojson existir)
+            if es_geojson:
+                fig_mapa.update_layout(mapbox_layers=[
+                    {
+                        "source": es_geojson,
+                        "type": "line",
+                        "color": "#6B5FB5",
+                        "line": {"width": 2},
+                    }
+                ])
 
             st.plotly_chart(fig_mapa, use_container_width=True)
 
@@ -325,12 +368,15 @@ elif pagina == "Visualizações":
         dims = ['score_feliz', 'score_medo', 'score_nervoso', 'score_neutro',
                 'score_nojo', 'score_triste', 'frequencia', 'desempenho']
         dims = [d for d in dims if d in df_f.columns]
-        fig_parallel = px.parallel_coordinates(
-            df_f, color="desempenho", dimensions=dims,
-            color_continuous_scale=px.colors.diverging.RdYlGn,
-            title="Gráfico de Coordenadas Paralelas"
-        )
-        st.plotly_chart(fig_parallel, use_container_width=True)
+        if dims:
+            fig_parallel = px.parallel_coordinates(
+                df_f, color="desempenho", dimensions=dims,
+                color_continuous_scale=px.colors.diverging.RdYlGn,
+                title="Gráfico de Coordenadas Paralelas"
+            )
+            st.plotly_chart(fig_parallel, use_container_width=True)
+        else:
+            st.info("Colunas para coordenadas paralelas não encontradas no dataset.")
 
     except Exception as e:
         st.error("Erro ao gerar visualizações.")
