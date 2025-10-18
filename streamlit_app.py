@@ -8,7 +8,8 @@ import plotly.express as px
 st.set_page_config(
     page_title="Análise de Emoções em Alunos",
     page_icon="📊",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed"
 )
 
 # ---------------------------
@@ -103,11 +104,42 @@ elif pagina == "Base de Dados":
                 key="regiao_bd"
             )
 
+        # Aplicação dos filtros básicos
         df_filtrado = df.copy()
         if emocao_selecionada != "Todas":
             df_filtrado = df_filtrado[df_filtrado["dominante_emocao"] == emocao_selecionada]
         if regiao_selecionada != "Todas":
             df_filtrado = df_filtrado[df_filtrado["regiao"] == regiao_selecionada]
+
+        # -------- Filtros avançados --------
+        with st.expander("Filtros avançados", expanded=False):
+            # Faixa de desempenho
+            if "desempenho" in df_filtrado.columns and pd.api.types.is_numeric_dtype(df_filtrado["desempenho"]):
+                des_min, des_max = float(df["desempenho"].min()), float(df["desempenho"].max())
+                f_des = st.slider(
+                    "Faixa de desempenho",
+                    des_min, des_max,
+                    (des_min, des_max), step=0.1, key="desempenho_bd_range"
+                )
+            else:
+                f_des = (None, None)
+
+            # Faixa de frequência
+            if "frequencia" in df_filtrado.columns and pd.api.types.is_numeric_dtype(df_filtrado["frequencia"]):
+                fr_min, fr_max = float(df["frequencia"].min()), float(df["frequencia"].max())
+                f_frq = st.slider(
+                    "Faixa de frequência (%)",
+                    fr_min, fr_max,
+                    (fr_min, fr_max), step=1.0, key="freq_bd_range"
+                )
+            else:
+                f_frq = (None, None)
+
+        # Aplica filtros avançados se válidos
+        if all(v is not None for v in f_des):
+            df_filtrado = df_filtrado[df_filtrado["desempenho"].between(f_des[0], f_des[1])]
+        if all(v is not None for v in f_frq):
+            df_filtrado = df_filtrado[df_filtrado["frequencia"].between(f_frq[0], f_frq[1])]
 
         st.markdown("---")
         st.subheader("Visualização da Base de Dados")
@@ -115,7 +147,10 @@ elif pagina == "Base de Dados":
 
         st.markdown("---")
         st.subheader("Estatísticas Descritivas")
-        st.dataframe(df_filtrado.describe(), use_container_width=True)
+        try:
+            st.dataframe(df_filtrado.describe(), use_container_width=True)
+        except Exception:
+            st.info("Não foi possível gerar estatísticas descritivas (verifique se há colunas numéricas).")
 
 # ---------------------------
 # Página: Visualizações
@@ -128,6 +163,7 @@ elif pagina == "Visualizações":
         st.error("Erro ao carregar os dados. Verifique os arquivos CSV.")
     else:
         st.caption(f"Fonte atual de dados: **{origem}**")
+
         # Filtros (com keys únicas)
         col1, col2 = st.columns(2)
         with col1:
@@ -143,80 +179,180 @@ elif pagina == "Visualizações":
                 key="regiao_vis"
             )
 
+        # Slider de altura do mapa na sidebar
+        map_height = st.sidebar.slider(
+            "Altura do mapa (px)", 600, 1600, 1100, step=50, key="map_h"
+        )
+
+        # Aplica filtros
         df_f = df.copy()
         if emocao_filtro != "Todas":
             df_f = df_f[df_f["dominante_emocao"] == emocao_filtro]
         if regiao_filtro != "Todas":
             df_f = df_f[df_f["regiao"] == regiao_filtro]
 
+        # ---------------------------
         # Mapa
+        # ---------------------------
         st.markdown("### 🗺️ Mapa das Emoções por Região (Espírito Santo)")
-
+        hover_cols = [c for c in ["id_aluno", "regiao", "frequencia", "desempenho"] if c in df_f.columns]
         fig_mapa = px.scatter_mapbox(
-             df_f,
+            df_f,
             lat="lat",
             lon="lon",
             color="dominante_emocao",
-            hover_data=["id_aluno", "regiao", "frequencia", "desempenho"],
+            hover_data=hover_cols,
             zoom=7,
-            height=900,  # ~dobro
+            height=map_height,
             mapbox_style="carto-positron",
-            title="Distribuição Geográfica das Emoções"
+            title="Distribuição Geográfica das Emoções",
+            labels={"dominante_emocao": "Emoção dominante"}
         )
-
-
-
-
-
-
-
+        # Legenda e margens
+        fig_mapa.update_layout(
+            legend_title_text="Emoção dominante",
+            margin=dict(l=0, r=0, t=40, b=0)
+        )
+        # Centraliza conforme o filtro
+        if not df_f.empty and {"lat", "lon"}.issubset(df_f.columns):
+            fig_mapa.update_layout(
+                mapbox=dict(center=dict(
+                    lat=float(df_f["lat"].mean()),
+                    lon=float(df_f["lon"].mean())
+                ), zoom=7)
+            )
         st.plotly_chart(fig_mapa, use_container_width=True)
 
         st.markdown("---")
-        # Distribuição
+        # ---------------------------
+        # Distribuição das Emoções
+        # ---------------------------
         st.subheader("Distribuição das Emoções")
-        contagem_emocoes = df_f["dominante_emocao"].value_counts(dropna=False).reset_index()
+        contagem_emocoes = df_f["dominante_emocao"].value_counts().reset_index()
         contagem_emocoes.columns = ["Emoção", "Frequência"]
+        contagem_emocoes = contagem_emocoes.sort_values("Frequência", ascending=False)
 
         col3, col4 = st.columns(2)
         with col3:
-            fig_bar = px.bar(contagem_emocoes, x="Emoção", y="Frequência", color="Emoção", text_auto=True,
-                             color_discrete_sequence=px.colors.qualitative.Set3)
+            fig_bar = px.bar(
+                contagem_emocoes, x="Emoção", y="Frequência",
+                color="Emoção", text_auto=True,
+                color_discrete_sequence=px.colors.qualitative.Set3,
+                labels={"Emoção": "Emoção", "Frequência": "Quantidade"}
+            )
+            fig_bar.update_layout(legend_title_text="Emoção dominante")
             st.plotly_chart(fig_bar, use_container_width=True)
+
         with col4:
-            fig_pie = px.pie(contagem_emocoes, names="Emoção", values="Frequência",
-                             color_discrete_sequence=px.colors.qualitative.Set3, hole=0.3)
-            fig_pie.update_traces(textinfo='percent+label')
+            fig_pie = px.pie(
+                contagem_emocoes, names="Emoção", values="Frequência",
+                hole=0.35, title="Distribuição de Emoções",
+                color_discrete_sequence=px.colors.qualitative.Set3
+            )
+            fig_pie.update_traces(textinfo="percent+label", pull=0.02)
+            fig_pie.update_layout(legend_title_text="Emoção dominante")
             st.plotly_chart(fig_pie, use_container_width=True)
 
         st.markdown("---")
-        # Scatter
+        # ---------------------------
+        # Scatter: Desempenho x Frequência
+        # ---------------------------
         st.subheader("Scatter: Desempenho x Frequência (colorido por emoção)")
-        fig_s = px.scatter(
-            df_f, x='frequencia', y='desempenho',
-            color='dominante_emocao', hover_data=['id_aluno', 'regiao'],
-            color_discrete_sequence=px.colors.qualitative.Set2
-        )
-        st.plotly_chart(fig_s, use_container_width=True)
+        if {"frequencia", "desempenho"}.issubset(df_f.columns):
+            fig_s = px.scatter(
+                df_f, x='frequencia', y='desempenho',
+                color='dominante_emocao' if 'dominante_emocao' in df_f.columns else None,
+                hover_data=[c for c in ['id_aluno', 'regiao'] if c in df_f.columns],
+                color_discrete_sequence=px.colors.qualitative.Set2,
+                labels={"frequencia": "Frequência (%)", "desempenho": "Desempenho"}
+            )
+            fig_s.update_layout(legend_title_text="Emoção dominante")
+            st.plotly_chart(fig_s, use_container_width=True)
+        else:
+            st.info("Não há colunas suficientes para o gráfico de dispersão (requer 'frequencia' e 'desempenho').")
 
         st.markdown("---")
-        # Coordenadas paralelas
+        # ---------------------------
+        # Gráfico de Coordenadas Paralelas
+        # ---------------------------
         st.subheader("Gráfico de Coordenadas Paralelas")
-        cols_parallel = ['score_feliz', 'score_medo', 'score_nervoso', 'score_neutro',
-                         'score_nojo', 'score_triste', 'frequencia', 'desempenho']
-        # Garante que as colunas existem
-        cols_parallel = [c for c in cols_parallel if c in df_f.columns]
-        if len(cols_parallel) >= 2:
+        alvo_dims = [
+            'score_feliz', 'score_medo', 'score_nervoso',
+            'score_neutro', 'score_nojo', 'score_triste',
+            'frequencia', 'desempenho'
+        ]
+        dims_ok = [c for c in alvo_dims if c in df_f.columns and pd.api.types.is_numeric_dtype(df_f[c])]
+        if len(dims_ok) >= 2:
             fig_parallel = px.parallel_coordinates(
                 df_f,
                 color="desempenho" if "desempenho" in df_f.columns else None,
-                dimensions=cols_parallel,
+                dimensions=dims_ok,
                 color_continuous_scale=px.colors.diverging.RdYlGn,
-                title="Relação entre Emoções, Frequência e Desempenho"
+                title="Relação entre Emoções, Frequência e Desempenho",
+                labels={c: c.replace("_", " ").title() for c in dims_ok}
             )
             st.plotly_chart(fig_parallel, use_container_width=True)
         else:
             st.info("Colunas insuficientes para o gráfico de coordenadas paralelas.")
+
+        st.markdown("---")
+        # ---------------------------
+        # Comparação direta: Desempenho por Emoção
+        # ---------------------------
+        st.subheader("Desempenho por Emoção (comparação)")
+        if {"dominante_emocao", "desempenho"}.issubset(df_f.columns):
+            agg = (
+                df_f.groupby("dominante_emocao", dropna=False)
+                    .agg(media_desempenho=("desempenho", "mean"),
+                         media_frequencia=("frequencia", "mean") if "frequencia" in df_f.columns else ("desempenho", "size"),
+                         n=("id_aluno", "count") if "id_aluno" in df_f.columns else ("dominante_emocao", "size"))
+                    .reset_index()
+            )
+            if "media_frequencia" not in agg.columns:
+                agg["media_frequencia"] = pd.NA
+            agg = agg.sort_values("media_desempenho", ascending=False)
+
+            colA, colB = st.columns(2)
+
+            with colA:
+                fig_perf_bar = px.bar(
+                    agg, x="dominante_emocao", y="media_desempenho",
+                    text="media_desempenho",
+                    title="Média de Desempenho por Emoção",
+                    labels={"dominante_emocao": "Emoção", "media_desempenho": "Média de desempenho"},
+                    color="dominante_emocao", color_discrete_sequence=px.colors.qualitative.Set2
+                )
+                fig_perf_bar.update_traces(texttemplate="%{text:.2f}")
+                fig_perf_bar.update_layout(showlegend=False)
+                st.plotly_chart(fig_perf_bar, use_container_width=True)
+
+            with colB:
+                if agg["media_frequencia"].notna().any():
+                    fig_freq_bar = px.bar(
+                        agg, x="dominante_emocao", y="media_frequencia",
+                        text="media_frequencia",
+                        title="Média de Frequência por Emoção",
+                        labels={"dominante_emocao": "Emoção", "media_frequencia": "Média de frequência (%)"},
+                        color="dominante_emocao", color_discrete_sequence=px.colors.qualitative.Set3
+                    )
+                    fig_freq_bar.update_traces(texttemplate="%{text:.1f}")
+                    fig_freq_bar.update_layout(showlegend=False)
+                    st.plotly_chart(fig_freq_bar, use_container_width=True)
+                else:
+                    st.info("Coluna 'frequencia' não disponível para média por emoção.")
+
+            # Boxplot de distribuição
+            st.markdown("### Distribuição do Desempenho por Emoção")
+            fig_box = px.box(
+                df_f, x="dominante_emocao", y="desempenho", points="all",
+                labels={"dominante_emocao": "Emoção", "desempenho": "Desempenho"},
+                title="Boxplot de Desempenho por Emoção",
+                color="dominante_emocao", color_discrete_sequence=px.colors.qualitative.Set1
+            )
+            fig_box.update_layout(showlegend=False)
+            st.plotly_chart(fig_box, use_container_width=True)
+        else:
+            st.info("Dados insuficientes para comparar desempenho por emoção.")
 
 # ---------------------------
 # Página: Futuras Expansões
