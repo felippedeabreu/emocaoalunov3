@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
 
 # ---------------------------
@@ -191,6 +192,10 @@ elif pagina == "Visualizações":
         if regiao_filtro != "Todas":
             df_f = df_f[df_f["regiao"] == regiao_filtro]
 
+        if df_f.empty:
+            st.info("Nenhum dado após os filtros selecionados.")
+            st.stop()
+
         # ---------------------------
         # Mapa
         # ---------------------------
@@ -214,7 +219,7 @@ elif pagina == "Visualizações":
             margin=dict(l=0, r=0, t=40, b=0)
         )
         # Centraliza conforme o filtro
-        if not df_f.empty and {"lat", "lon"}.issubset(df_f.columns):
+        if {"lat", "lon"}.issubset(df_f.columns):
             fig_mapa.update_layout(
                 mapbox=dict(center=dict(
                     lat=float(df_f["lat"].mean()),
@@ -341,7 +346,9 @@ elif pagina == "Visualizações":
                 else:
                     st.info("Coluna 'frequencia' não disponível para média por emoção.")
 
-            # Boxplot de distribuição
+            # ---------------------------
+            # Boxplot de distribuição (ordenado + escala)
+            # ---------------------------
             st.markdown("### Distribuição do Desempenho por Emoção")
             fig_box = px.box(
                 df_f, x="dominante_emocao", y="desempenho", points="all",
@@ -350,9 +357,77 @@ elif pagina == "Visualizações":
                 color="dominante_emocao", color_discrete_sequence=px.colors.qualitative.Set1
             )
             fig_box.update_layout(showlegend=False)
+
+            # Detecta escala automaticamente
+            if "desempenho" in df_f.columns and not df_f["desempenho"].empty:
+                max_des = float(df_f["desempenho"].max())
+                escala = "0–10" if max_des <= 10 else "0–100"
+            else:
+                escala = "0–100"
+            fig_box.update_layout(yaxis_title=f"Desempenho ({escala})")
+
+            # Ordena emoções pela mediana (decrescente)
+            order = (
+                df_f.groupby("dominante_emocao")["desempenho"]
+                    .median()
+                    .sort_values(ascending=False)
+                    .index
+            )
+            fig_box.update_xaxes(categoryorder="array", categoryarray=order)
+
             st.plotly_chart(fig_box, use_container_width=True)
         else:
             st.info("Dados insuficientes para comparar desempenho por emoção.")
+
+        st.markdown("---")
+        # ---------------------------
+        # Correlação: Desempenho × Frequência
+        # ---------------------------
+        st.subheader("Correlação: Desempenho × Frequência")
+        if {"desempenho", "frequencia"}.issubset(df_f.columns):
+            # Correlação geral (Pearson)
+            if df_f[["desempenho", "frequencia"]].dropna().shape[0] >= 2:
+                corr_geral = df_f[["desempenho", "frequencia"]].corr(method="pearson").iloc[0, 1]
+                st.metric("Correlação geral (Pearson)", f"{corr_geral:.2f}")
+            else:
+                st.metric("Correlação geral (Pearson)", "N/A")
+
+            # Correlação por emoção
+            corr_por_emo = (
+                df_f.groupby("dominante_emocao")
+                    .apply(lambda g: g["desempenho"].corr(g["frequencia"]))
+                    .reset_index(name="correlacao_pearson")
+                    .sort_values("correlacao_pearson", ascending=False)
+            )
+            st.dataframe(corr_por_emo, use_container_width=True)
+
+            # Heatmap de correlação entre numéricas
+            num_cols = df_f.select_dtypes(include="number").columns
+            if len(num_cols) >= 2:
+                fig_heat = px.imshow(
+                    df_f[num_cols].corr().round(2),
+                    text_auto=True,
+                    color_continuous_scale="RdBu",
+                    origin="lower",
+                    title="Matriz de correlação (colunas numéricas)"
+                )
+                st.plotly_chart(fig_heat, use_container_width=True)
+
+            # Dispersão com facetas por emoção
+            st.markdown("### Dispersão por emoção (Frequência × Desempenho)")
+            fig_facets = px.scatter(
+                df_f,
+                x="frequencia", y="desempenho",
+                color="dominante_emocao",
+                facet_col="dominante_emocao", facet_col_wrap=3,
+                opacity=0.7,
+                hover_data=[c for c in ["id_aluno", "regiao"] if c in df_f.columns],
+                labels={"frequencia": "Frequência (%)", "desempenho": f"Desempenho ({escala})"}
+            )
+            fig_facets.update_layout(showlegend=False, margin=dict(l=0, r=0, t=40, b=0))
+            st.plotly_chart(fig_facets, use_container_width=True)
+        else:
+            st.info("Para calcular correlação, preciso das colunas 'desempenho' e 'frequencia'.")
 
 # ---------------------------
 # Página: Futuras Expansões
